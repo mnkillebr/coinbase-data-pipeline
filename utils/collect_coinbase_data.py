@@ -17,7 +17,19 @@ granularities = ["FIFTEEN_MINUTE", "ONE_HOUR", "FOUR_HOUR", "ONE_DAY"]
 # Setup logging
 def setup_logging():
     """Setup logging configuration for monitoring updates"""
-    log_dir = "/Users/marcus/ML_Projects/Algo_Trading/logs"
+    from airflow.sdk import Variable
+
+    try:
+      log_dir = Variable.get("LOG_DIR")
+    except Exception as e:
+      print(f"Error getting log directory from Airflow Variables: {e}")
+      config = dotenv_values(".env")
+
+      if not config.get("LOG_DIR"):
+          raise ValueError("LOG_DIR not found in Airflow Variables or environment")
+
+      log_dir = config["LOG_DIR"]
+      print(f"Using log directory from environment variables: {log_dir}")
     os.makedirs(log_dir, exist_ok=True)
     
     log_filename = f"crypto_data_updates_{datetime.now().strftime('%Y%m%d')}.log"
