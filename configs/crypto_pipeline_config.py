@@ -35,7 +35,8 @@ GRANULARITIES = {
 AWS_CONFIG = {
     "s3_bucket": "<s3_bucket_name>",  # Update with your S3 bucket name
     "aws_profile": "<aws_profile_name>",  # Update with your AWS profile name
-    "s3_prefix": "<s3_prefix>"  # S3 path prefix for uploaded files
+    "s3_prefix": "<s3_prefix>",  # S3 path prefix for uploaded files
+    "s3_processed_prefix": "<s3_processed_prefix>"  # S3 path prefix for processed data
 }
 
 # File paths and directories

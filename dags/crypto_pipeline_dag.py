@@ -26,7 +26,8 @@ def get_environment_config():
         **PATHS,
         "aws_profile": AWS_CONFIG["aws_profile"],
         "s3_bucket": AWS_CONFIG["s3_bucket"],
-        "s3_prefix": AWS_CONFIG["s3_prefix"]
+        "s3_prefix": AWS_CONFIG["s3_prefix"],
+        "s3_processed_prefix": AWS_CONFIG["s3_processed_prefix"]
     }
 
 @task.branch
@@ -147,6 +148,18 @@ def create_spark_processing_task(product_id: str, granularity: str):
         }
     )
 
+@task.bash
+def upload_to_s3_processed_task(product_id: str, granularity: str):
+    """TaskFlow task to upload processed data directory to S3"""
+    config = get_environment_config()
+    
+    # Construct file paths
+    sanitized_product = product_id.replace("-", "_").replace("/", "_")
+    local_path = f"{SPARK_CONFIG['output_dir']}/{sanitized_product}_{granularity.lower()}"
+    script_path = f"{config['scripts_dir']}/upload_directory_to_s3.sh"
+    s3_path = f"s3://{config['s3_bucket']}/{config['s3_processed_prefix']}/{sanitized_product}_{granularity.lower()}"
+    
+    return f"{script_path} {local_path} {s3_path} {config['aws_profile']}"
 
 # Generate DAGs dynamically
 for granularity, granularity_config in GRANULARITIES.items():
@@ -175,10 +188,13 @@ for granularity, granularity_config in GRANULARITIES.items():
             # Create Spark processing task
             spark_task = create_spark_processing_task(product_id, granularity)
             
+            # Create S3 upload task for processed data
+            upload_processed_result = upload_to_s3_processed_task(product_id, granularity)
+            
             # Set up conditional dependencies:
             # Branch -> [update OR collect] -> upload -> spark
             branch_task >> [update_result, collect_result]
-            [update_result, collect_result] >> upload_result >> spark_task
+            [update_result, collect_result] >> upload_result >> spark_task >> upload_processed_result
     
     # Make the DAG available to Airflow
     globals()[f"dag_{granularity.lower()}"] = create_crypto_pipeline()
