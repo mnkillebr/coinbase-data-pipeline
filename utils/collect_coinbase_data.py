@@ -108,37 +108,30 @@ def get_last_closed_candle_time(granularity: str):
         # Daily candles close at 8 PM EST (1 AM UTC next day)
         # Always go back to yesterday's 8 PM close to ensure the candle is fully closed
         # This ensures we never collect today's candle until it's actually closed
-        last_close = now_est.replace(hour=20, minute=0, second=0, microsecond=0) - timedelta(days=1)
-        
-        # Convert back to UTC
+        if now_est.hour < 20:
+            last_close = now_est.replace(hour=20, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        else:
+            last_close = now_est.replace(hour=20, minute=0, second=0, microsecond=0)
         return last_close
     
     elif granularity == "FOUR_HOUR":
         # 4-hour candles: ensure at least 4 hours have passed since the candle start
         # Find the last 4-hour boundary and ensure it's closed
         hours_back = now.hour % 4
-        if hours_back == 0:
-            # We're exactly at a 4-hour boundary, need to go back 4 hours to get closed candle
-            hours_back = 4
-        last_close = now_est.replace(minute=0, second=0, microsecond=0) - timedelta(hours=hours_back+4)
+        last_close = now_est.replace(minute=0, second=0, microsecond=0) - timedelta(hours=hours_back)
         return last_close
     
     elif granularity == "ONE_HOUR":
         # Hourly candles: ensure at least 1 hour has passed since the candle start
         # Find the last hour boundary and ensure it's closed
-        last_close = now_est.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        last_close = now_est.replace(minute=0, second=0, microsecond=0)
         return last_close
     
     elif granularity == "FIFTEEN_MINUTE":
         # 15-minute candles: ensure at least 15 minutes have passed since the candle start
         # Find the last 15-minute boundary and ensure it's closed
         minutes_back = now_est.minute % 15
-        print(minutes_back)
-        print(now_est)
-        if minutes_back == 0:
-            # We're exactly at a 15-minute boundary, need to go back 15 minutes to get closed candle
-            minutes_back = 15
-        last_close = now_est.replace(second=0, microsecond=0) - timedelta(minutes=(minutes_back+15))
+        last_close = now_est.replace(second=0, microsecond=0) - timedelta(minutes=(minutes_back))
         return last_close
     
     else:
