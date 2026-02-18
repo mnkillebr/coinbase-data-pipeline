@@ -116,7 +116,12 @@ def upload_to_s3_task(product_id: str, granularity: str):
     s3_path = f"s3://{config['s3_bucket']}/{config['s3_prefix']}/{sanitized_product}_{granularity.lower()}.csv"
     script_path = f"{config['scripts_dir']}/upload_to_s3.sh"
 
-    return f"{script_path} {local_file} {s3_path} {config['aws_profile']}"
+    # AWS profile is now optional (script handles env vars if profile not provided)
+    aws_profile = config.get('aws_profile', '') or ''
+    if aws_profile:
+        return f"{script_path} {local_file} {s3_path} {aws_profile}"
+    else:
+        return f"{script_path} {local_file} {s3_path}"
 
 
 @task
@@ -236,7 +241,12 @@ def upload_to_s3_processed_task(product_id: str, granularity: str):
     script_path = f"{config['scripts_dir']}/upload_directory_to_s3.sh"
     s3_path = f"s3://{config['s3_bucket']}/{config['s3_processed_prefix']}/{sanitized_product}_{granularity.lower()}"
     
-    return f"{script_path} {local_path} {s3_path} {config['aws_profile']}"
+    # AWS profile is now optional (script handles env vars if profile not provided)
+    aws_profile = config.get('aws_profile', '') or ''
+    if aws_profile:
+        return f"{script_path} {local_path} {s3_path} {aws_profile}"
+    else:
+        return f"{script_path} {local_path} {s3_path}"
 
 # Generate DAGs dynamically
 for granularity, granularity_config in GRANULARITIES.items():

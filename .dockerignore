@@ -1,0 +1,75 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Environment files (secrets)
+.env
+.env.local
+.env.*.local
+
+# Local data directories (will be mounted as volumes)
+data/
+logs/
+output/
+*.csv
+*.parquet
+
+# Documentation
+*.md
+!README.md
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Airflow specific
+airflow.cfg
+airflow.db
+unittests.cfg
+
+# Docker files (don't need to copy into image)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Lock files (if using uv)
+uv.lock
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+
+# OS files
+Thumbs.db
+.DS_Store
