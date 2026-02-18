@@ -14,19 +14,19 @@ TIMEZONE = "America/New_York"  # EST/EDT timezone
 # Granularities with their corresponding cron schedules
 GRANULARITIES = {
     "FIFTEEN_MINUTE": {
-        "schedule": "2,17,32,47 * * * *",  # Every 15 minutes
+        "schedule": "1,16,31,46 * * * *",  # Every 15 minutes
         "description": "15-minute candles"
     },
     "ONE_HOUR": {
-        "schedule": "0 * * * *",  # Every hour at minute 0
+        "schedule": "1 * * * *",  # Every hour at minute 1
         "description": "Hourly candles"
     },
     "FOUR_HOUR": {
-        "schedule": "0 */4 * * *",  # Every 4 hours
+        "schedule": "1 */4 * * *",  # Every 4 hours at minute 1
         "description": "4-hour candles"
     },
     "ONE_DAY": {
-        "schedule": "0 20 * * *",  # Daily at 8 PM EST (after market close)
+        "schedule": "1 20 * * *",  # Daily at 8 PM EST (after market close) at minute 1
         "description": "Daily candles"
     }
 }
