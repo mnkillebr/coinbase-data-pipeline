@@ -20,6 +20,7 @@ from configs.crypto_pipeline_config import (
 # Import the data collection functions from the project root
 from utils.collect_coinbase_data import collect_and_save_candles, update_existing_data, logger
 from utils.calculate_technical_indicators import calculate_and_save_indicators
+from utils.calculate_risk_target import calculate_risk_target_and_save
 
 def get_environment_config():
     """Get configuration"""
@@ -152,6 +153,47 @@ def calculate_technical_indicators_task(product_id: str, granularity: str):
         logger.error(f"Error calculating technical indicators for {product_id} {granularity}: {e}")
         raise
 
+@task
+def calculate_risk_target_task(product_id: str, granularity: str, indicators_output_file: str):
+    """TaskFlow task to calculate risk target for a specific product and granularity
+    
+    Args:
+        product_id: Product identifier (e.g., BTC-USD)
+        granularity: Time granularity (e.g., ONE_DAY)
+        indicators_output_file: Path to parquet file from technical indicators task
+    """
+    config = get_environment_config()
+    try:
+        logger.info(f"Starting risk target calculation for {product_id} {granularity}")
+        logger.info(f"Using indicators file: {indicators_output_file}")
+        
+        # Construct file paths
+        sanitized_product = product_id.replace("-", "_").replace("/", "_")
+        
+        # Get output directory from appropriate config
+        output_dir = SPARK_CONFIG.get('output_dir', config.get('data_dir', '/tmp'))
+        
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Output file will be the same name but with risk target suffix
+        # Or we can overwrite the same file since it will have additional columns
+        output_file = f"{output_dir}/{sanitized_product}_{granularity.lower()}.parquet"
+        
+        # Calculate and save risk target (input is the parquet file from indicators task)
+        result_file = calculate_risk_target_and_save(
+            product_id=product_id,
+            granularity=granularity,
+            input_file=indicators_output_file,
+            output_file=output_file
+        )
+        
+        logger.info(f"Successfully calculated risk target for {product_id} {granularity}")
+        return result_file
+    except Exception as e:
+        logger.error(f"Error calculating risk target for {product_id} {granularity}: {e}")
+        raise
+
 def create_spark_processing_task(product_id: str, granularity: str):
     """Create a SparkSubmitOperator task to process data with Spark"""
     config = get_environment_config()
@@ -223,6 +265,9 @@ for granularity, granularity_config in GRANULARITIES.items():
             # Create technical indicators calculation task
             indicators_task = calculate_technical_indicators_task(product_id, granularity)
             
+            # Create risk target calculation task (uses output from indicators_task)
+            risk_target_task = calculate_risk_target_task(product_id, granularity, indicators_task)
+
             # Create Spark processing task
             # spark_task = create_spark_processing_task(product_id, granularity)
             
@@ -232,7 +277,7 @@ for granularity, granularity_config in GRANULARITIES.items():
             # Set up conditional dependencies:
             # Branch -> [update OR collect] -> upload -> spark
             branch_task >> [update_result, collect_result]
-            [update_result, collect_result] >> upload_result >> indicators_task >> upload_processed_result
+            [update_result, collect_result] >> upload_result >> indicators_task >> risk_target_task >>upload_processed_result
     
     # Make the DAG available to Airflow
     globals()[f"dag_{granularity.lower()}"] = create_crypto_pipeline()
