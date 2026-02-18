@@ -19,6 +19,7 @@ from configs.crypto_pipeline_config import (
 
 # Import the data collection functions from the project root
 from utils.collect_coinbase_data import collect_and_save_candles, update_existing_data, logger
+from utils.calculate_technical_indicators import calculate_and_save_indicators
 
 def get_environment_config():
     """Get configuration"""
@@ -60,6 +61,7 @@ def check_data_exists_branch(product_id: str, granularity: str):
 @task
 def collect_initial_data_task(product_id: str, granularity: str):
     """TaskFlow task to collect initial data for a specific product and granularity"""
+    config = get_environment_config()
     try:
         logger.info(f"Starting initial data collection for {product_id} {granularity}")
         
@@ -76,7 +78,7 @@ def collect_initial_data_task(product_id: str, granularity: str):
             total_candles = 4000  # Default to daily amount
         
         print(f"Collecting {total_candles} initial candles for {product_id} on {granularity}")
-        result = collect_and_save_candles(product_id, granularity, total_candles)
+        result = collect_and_save_candles(product_id, granularity, total_candles, config['data_dir'])
         if result is not None:
             logger.info(f"Successfully collected initial data for {product_id} {granularity}")
             return f"Collected initial data for {product_id} {granularity}"
@@ -102,7 +104,6 @@ def update_data_task(product_id: str, granularity: str):
         logger.error(f"Error updating {product_id} {granularity}: {e}")
         raise
 
-
 @task.bash(trigger_rule=TriggerRule.ONE_SUCCESS)
 def upload_to_s3_task(product_id: str, granularity: str):
     """TaskFlow task to upload updated CSV to S3"""
@@ -116,6 +117,40 @@ def upload_to_s3_task(product_id: str, granularity: str):
 
     return f"{script_path} {local_file} {s3_path} {config['aws_profile']}"
 
+
+@task
+def calculate_technical_indicators_task(product_id: str, granularity: str):
+    """TaskFlow task to calculate technical indicators for a specific product and granularity"""
+    config = get_environment_config()
+    try:
+        logger.info(f"Starting technical indicator calculation for {product_id} {granularity}")
+        
+        # Construct file paths
+        sanitized_product = product_id.replace("-", "_").replace("/", "_")
+        input_file = f"{config['data_dir']}/{sanitized_product}_{granularity.lower()}.csv"
+        
+        # Get output directory from appropriate config
+        output_dir = SPARK_CONFIG.get('output_dir', config.get('data_dir', '/tmp'))
+        
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+        
+        output_file = f"{output_dir}/{sanitized_product}_{granularity.lower()}.parquet"
+        
+        # Calculate and save indicators
+        result_file = calculate_and_save_indicators(
+            product_id=product_id,
+            granularity=granularity,
+            input_file=input_file,
+            output_file=output_file
+        )
+        
+        logger.info(f"Successfully calculated indicators for {product_id} {granularity}")
+        return result_file
+        
+    except Exception as e:
+        logger.error(f"Error calculating technical indicators for {product_id} {granularity}: {e}")
+        raise
 
 def create_spark_processing_task(product_id: str, granularity: str):
     """Create a SparkSubmitOperator task to process data with Spark"""
@@ -184,9 +219,12 @@ for granularity, granularity_config in GRANULARITIES.items():
             
             # Create S3 upload task
             upload_result = upload_to_s3_task(product_id, granularity)
+
+            # Create technical indicators calculation task
+            indicators_task = calculate_technical_indicators_task(product_id, granularity)
             
             # Create Spark processing task
-            spark_task = create_spark_processing_task(product_id, granularity)
+            # spark_task = create_spark_processing_task(product_id, granularity)
             
             # Create S3 upload task for processed data
             upload_processed_result = upload_to_s3_processed_task(product_id, granularity)
@@ -194,7 +232,7 @@ for granularity, granularity_config in GRANULARITIES.items():
             # Set up conditional dependencies:
             # Branch -> [update OR collect] -> upload -> spark
             branch_task >> [update_result, collect_result]
-            [update_result, collect_result] >> upload_result >> spark_task >> upload_processed_result
+            [update_result, collect_result] >> upload_result >> indicators_task >> upload_processed_result
     
     # Make the DAG available to Airflow
     globals()[f"dag_{granularity.lower()}"] = create_crypto_pipeline()
