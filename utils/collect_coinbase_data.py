@@ -20,16 +20,17 @@ def setup_logging():
     from airflow.sdk import Variable
 
     try:
-      log_dir = Variable.get("LOG_DIR")
+        log_dir = Variable.get("LOG_DIR")
     except Exception as e:
-      print(f"Error getting log directory from Airflow Variables: {e}")
-      config = dotenv_values(".env")
+        print(f"Error getting log directory from Airflow Variables: {e}")
+        config = dotenv_values(".env")
 
-      if not config.get("LOG_DIR"):
-          raise ValueError("LOG_DIR not found in Airflow Variables or environment")
+        if not config.get("LOG_DIR"):
+            raise ValueError("LOG_DIR not found in Airflow Variables or environment")
 
-      log_dir = config["LOG_DIR"]
-      print(f"Using log directory from environment variables: {log_dir}")
+        log_dir = config["LOG_DIR"]
+        print(f"Using log directory from environment variables: {log_dir}")
+
     os.makedirs(log_dir, exist_ok=True)
     
     log_filename = f"crypto_data_updates_{datetime.now().strftime('%Y%m%d')}.log"
@@ -196,6 +197,9 @@ def append_new_candles_to_file(filepath: str, new_candles: list, granularity: st
         
         # Sort by start time
         combined_df = combined_df.sort_values('start').reset_index(drop=True)
+
+        # Drop last row
+        combined_df = combined_df.iloc[:-1]
         
         # Save combined data
         combined_df.to_csv(filepath, index=False)
@@ -215,8 +219,11 @@ def update_existing_data(product_id: str, granularity: str, data_dir: str):
     """
     Update existing data file with new candles since the last update.
     This function is designed for scheduled runs to append new data.
+    Handles cases where more than 350 candles are needed by making multiple API requests.
     """
+    import time
     import random
+    import math
     
     # Add small random delay to prevent simultaneous file access
     time.sleep(random.uniform(0.1, 0.5))
@@ -248,63 +255,148 @@ def update_existing_data(product_id: str, granularity: str, data_dir: str):
     # Calculate the start time for new data (next period after last candle)
     # Convert to UTC timezone-aware datetime to match get_last_closed_candle_time output
     last_candle_time = datetime.fromtimestamp(last_timestamp, tz=pytz.UTC)
-    
-    if granularity == "ONE_DAY":
-        start_time = last_candle_time + timedelta(days=1)
-    elif granularity == "FOUR_HOUR":
-        start_time = last_candle_time + timedelta(hours=4)
-    elif granularity == "ONE_HOUR":
-        start_time = last_candle_time + timedelta(hours=1)
-    elif granularity == "FIFTEEN_MINUTE":
-        start_time = last_candle_time + timedelta(minutes=15)
-    else:
-        start_time = last_candle_time + timedelta(days=1)
+    est = pytz.timezone('US/Eastern')
+    start_time = last_candle_time.astimezone(est)
     
     # Get the current end time (last closed candle) - this returns UTC timezone-aware datetime
     end_time = get_last_closed_candle_time(granularity)
     
     # Check if we need to collect new data
     if start_time >= end_time:
-        logger.info(f"No new data needed for {product_id} {granularity}. Last candle: {last_candle_time}, Current end: {end_time}")
+        logger.info(f"No new data needed for {product_id} {granularity}. Last candle: {start_time}, Current end: {end_time}")
         return True
     
     logger.info(f"Collecting new data from {start_time} to {end_time}")
     
-    # Convert to Unix timestamps
-    start_timestamp = str(int(start_time.timestamp()))
-    end_timestamp = str(int(end_time.timestamp()))
+    # Calculate the time difference and estimate number of candles needed
+    time_diff = end_time - start_time
+    if granularity == "ONE_DAY":
+        periods_needed = time_diff.days
+    elif granularity == "FOUR_HOUR":
+        periods_needed = int(time_diff.total_seconds() / (4 * 3600))
+    elif granularity == "ONE_HOUR":
+        periods_needed = int(time_diff.total_seconds() / 3600)
+    elif granularity == "FIFTEEN_MINUTE":
+        periods_needed = int(time_diff.total_seconds() / (15 * 60))
+    else:
+        # Default to daily
+        periods_needed = time_diff.days
     
-    try:
-        # Make API call to get new candles
-        response = get_product_candles(product_id, granularity, start_timestamp, end_timestamp)
-        # Convert response object to dictionary
-        response_dict = response.to_dict() if hasattr(response, 'to_dict') else response
-        
-        if response_dict and 'candles' in response_dict:
-            new_candles = response_dict['candles']
-            logger.info(f"Collected {len(new_candles)} new candles")
-            
-            if new_candles:
-                # Append new candles to existing file
-                success = append_new_candles_to_file(filepath, new_candles, granularity)
-                if success:
-                    logger.info(f"Successfully updated {product_id} {granularity} with {len(new_candles)} new candles")
-                    return True
-                else:
-                    logger.error(f"Failed to append new candles to {filepath}")
-                    return False
+    logger.info(f"Estimated periods needed: {periods_needed}")
+    
+    # Calculate number of requests needed
+    num_requests = math.ceil(periods_needed / max_candles_per_request) if periods_needed > 0 else 1
+    
+    logger.info(f"Will make {num_requests} request(s) to collect all candles")
+    
+    all_new_candles = []
+    successful_requests = 0
+    failed_requests = 0
+    
+    # Make multiple requests if needed
+    for i in range(num_requests):
+        # Calculate start and end times for this request
+        if i == 0:
+            # First request: from start_time forward max_candles_per_request periods
+            request_start = start_time
+            if granularity == "ONE_DAY":
+                request_end = request_start + timedelta(days=max_candles_per_request)
+            elif granularity == "FOUR_HOUR":
+                request_end = request_start + timedelta(hours=4 * max_candles_per_request)
+            elif granularity == "ONE_HOUR":
+                request_end = request_start + timedelta(hours=max_candles_per_request)
+            elif granularity == "FIFTEEN_MINUTE":
+                request_end = request_start + timedelta(minutes=15 * max_candles_per_request)
             else:
-                logger.info(f"No new candles found for {product_id} {granularity}")
-                return True
-        else:
-            logger.warning(f"No response or candles in response for {product_id} {granularity}")
-            return False
+                request_end = request_start + timedelta(days=max_candles_per_request)
             
-    except Exception as e:
-        logger.error(f"Error collecting new data for {product_id} {granularity}: {e}")
-        return False
+            # Don't exceed the overall end_time
+            if request_end > end_time:
+                request_end = end_time
+        else:
+            # Subsequent requests: slide the window forward
+            request_start = request_end
+            if granularity == "ONE_DAY":
+                request_end = request_start + timedelta(days=max_candles_per_request)
+            elif granularity == "FOUR_HOUR":
+                request_end = request_start + timedelta(hours=4 * max_candles_per_request)
+            elif granularity == "ONE_HOUR":
+                request_end = request_start + timedelta(hours=max_candles_per_request)
+            elif granularity == "FIFTEEN_MINUTE":
+                request_end = request_start + timedelta(minutes=15 * max_candles_per_request)
+            else:
+                request_end = request_start + timedelta(days=max_candles_per_request)
+            
+            # Don't exceed the overall end_time
+            if request_end > end_time:
+                request_end = end_time
+        
+        # Convert to Unix timestamps
+        start_timestamp = str(int(request_start.timestamp()))
+        end_timestamp = str(int(request_end.timestamp()))
+        
+        logger.info(f"Request {i+1}/{num_requests}: {request_start.strftime('%Y-%m-%d %H:%M:%S %Z')} to {request_end.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        
+        try:
+            # Make API call to get new candles
+            response = get_product_candles(product_id, granularity, start_timestamp, end_timestamp)
+            # Convert response object to dictionary
+            response_dict = response.to_dict() if hasattr(response, 'to_dict') else response
+            
+            if response_dict and 'candles' in response_dict:
+                candles = response_dict['candles']
+                all_new_candles.extend(candles)
+                successful_requests += 1
+                logger.info(f"  Collected {len(candles)} candles")
+            else:
+                logger.warning(f"  No candles returned for this request")
+                failed_requests += 1
+            
+            # Rate limiting: wait if we're approaching the limit
+            # Add a small buffer and wait 0.5 seconds between requests
+            if i < num_requests - 1:  # Don't wait after the last request
+                time.sleep(0.5)
+                
+        except Exception as e:
+            logger.error(f"  Error collecting data for request {i+1}: {e}")
+            failed_requests += 1
+            continue
+        
+        # Break if we've reached the end_time
+        if request_end >= end_time:
+            break
+    
+    logger.info(f"Collection complete. Successful requests: {successful_requests}, Failed requests: {failed_requests}")
+    
+    # Process all collected candles
+    if all_new_candles:
+        # Sort all candles by start time (ascending)
+        all_new_candles.sort(key=lambda x: int(x['start']))
+        
+        # Filter out candles that are beyond our calculated end time
+        end_timestamp = int(end_time.timestamp())
+        filtered_candles = [candle for candle in all_new_candles if int(candle['start']) <= end_timestamp]
+        
+        if filtered_candles:
+            logger.info(f"Total candles collected: {len(all_new_candles)}")
+            logger.info(f"Total candles after filtering: {len(filtered_candles)}")
+            
+            # Append all new candles to existing file
+            success = append_new_candles_to_file(filepath, filtered_candles, granularity)
+            if success:
+                logger.info(f"Successfully updated {product_id} {granularity} with {len(filtered_candles)} new candles")
+                return True
+            else:
+                logger.error(f"Failed to append new candles to {filepath}")
+                return False
+        else:
+            logger.info(f"No new candles found after filtering for {product_id} {granularity}")
+            return True
+    else:
+        logger.info(f"No new candles found for {product_id} {granularity}")
+        return True
 
-def collect_and_save_candles(product_id: str, granularity: str, total_candles_needed: int):
+def collect_and_save_candles(product_id: str, granularity: str, total_candles_needed: int, data_dir: str):
     """
     Collects and saves candles for a given product and granularity.
     Uses multiple API calls with 340-period windows to collect all data.
@@ -363,9 +455,11 @@ def collect_and_save_candles(product_id: str, granularity: str, total_candles_ne
         try:
             # Make API call
             response = get_product_candles(product_id, granularity, start_timestamp, end_timestamp)
+            # Convert response object to dictionary
+            response_dict = response.to_dict() if hasattr(response, 'to_dict') else response
             
-            if response and 'candles' in response:
-                candles = response['candles']
+            if response_dict and 'candles' in response_dict:
+                candles = response_dict['candles']
                 all_candles.extend(candles)
                 successful_requests += 1
                 logger.info(f"  Collected {len(candles)} candles")
@@ -427,10 +521,10 @@ def collect_and_save_candles(product_id: str, granularity: str, total_candles_ne
             # Create a sanitized product name for filename
             sanitized_product = product_id.replace("-", "_").replace("/", "_")
             csv_filename = f"{sanitized_product}_{granularity.lower()}.csv"
-            csv_filepath = os.path.join("data", csv_filename)
+            csv_filepath = os.path.join(data_dir, csv_filename)
             # pq_filename = f"{sanitized_product}_{granularity.lower()}.parquet"
             # pq_filepath = os.path.join("data", pq_filename)
-            os.makedirs("data", exist_ok=True)
+            os.makedirs(data_dir, exist_ok=True)
             
             df.to_csv(csv_filepath, index=False)
             # df.to_parquet(pq_filepath, index=False)
