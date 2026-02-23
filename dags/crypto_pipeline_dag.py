@@ -124,7 +124,7 @@ def upload_to_s3_task(product_id: str, granularity: str):
         return f"{script_path} {local_file} {s3_path}"
 
 
-@task
+@task(trigger_rule=TriggerRule.ONE_SUCCESS)
 def calculate_technical_indicators_task(product_id: str, granularity: str):
     """TaskFlow task to calculate technical indicators for a specific product and granularity"""
     config = get_environment_config()
@@ -270,7 +270,7 @@ for granularity, granularity_config in GRANULARITIES.items():
             collect_result = collect_initial_data_task(product_id, granularity)
             
             # Create S3 upload task
-            upload_result = upload_to_s3_task(product_id, granularity)
+            # upload_result = upload_to_s3_task(product_id, granularity)
 
             # Create technical indicators calculation task
             indicators_task = calculate_technical_indicators_task(product_id, granularity)
@@ -282,12 +282,13 @@ for granularity, granularity_config in GRANULARITIES.items():
             # spark_task = create_spark_processing_task(product_id, granularity)
             
             # Create S3 upload task for processed data
-            upload_processed_result = upload_to_s3_processed_task(product_id, granularity)
+            # upload_processed_result = upload_to_s3_processed_task(product_id, granularity)
             
             # Set up conditional dependencies:
             # Branch -> [update OR collect] -> upload -> spark
             branch_task >> [update_result, collect_result]
-            [update_result, collect_result] >> upload_result >> indicators_task >> risk_target_task >>upload_processed_result
+            [update_result, collect_result] >> indicators_task >> risk_target_task
+            # [update_result, collect_result] >> upload_result >> indicators_task >> risk_target_task >> upload_processed_result
     
     # Call to register the DAG with Airflow (2.4+ auto-registers; assigning to globals() for older discovery)
     dag_instance = create_crypto_pipeline()
