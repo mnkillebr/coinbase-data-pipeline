@@ -58,7 +58,7 @@ BASE_PATH = get_base_path()
 
 PATHS = {
     "data_dir": os.getenv("DATA_DIR", os.path.join(BASE_PATH, "data")),
-    "logs_dir": os.getenv("LOGS_DIR", os.path.join(BASE_PATH, "logs")),
+    "log_dir": os.getenv("LOG_DIR", os.path.join(BASE_PATH, "logs")),
     "scripts_dir": os.getenv("SCRIPTS_DIR", os.path.join(BASE_PATH, "scripts")),
     "spark_job_path": os.path.join(BASE_PATH, "spark_jobs", "process_crypto_data_spark.py"),
     "collect_script": os.path.join(BASE_PATH, "utils", "collect_coinbase_data.py")

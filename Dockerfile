@@ -4,34 +4,43 @@ FROM apache/airflow:3.1.0-python3.12
 # Switch to root to install system packages
 USER root
 
-# Install system dependencies for TA-Lib compilation and AWS CLI
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Set working directory
+WORKDIR /opt/airflow
+
+# Install build dependencies and download TA-Lib C source
+RUN apt-get update && apt-get install -y \
     build-essential \
-    gcc \
-    g++ \
-    make \
     wget \
-    tar \
     curl \
+    make \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install TA-Lib C library from source
-# This must be done BEFORE installing the Python TA-Lib package
-# Reference: https://ta-lib.github.io/ta-lib-python/install.html
-RUN cd /tmp && \
-    wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
-    tar -xzf ta-lib-0.4.0-src.tar.gz && \
-    cd ta-lib && \
+RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
+    tar -xvf ta-lib-0.4.0-src.tar.gz
+
+# Compile and install the TA-Lib C library
+# Update config.guess and config.sub to support ARM64 (Apple Silicon)
+# The original scripts from 2006 don't recognize modern architectures
+WORKDIR /opt/airflow/ta-lib
+RUN curl -L 'https://raw.githubusercontent.com/gcc-mirror/gcc/master/config.guess' -o config.guess && \
+    curl -L 'https://raw.githubusercontent.com/gcc-mirror/gcc/master/config.sub' -o config.sub && \
+    chmod +x config.guess config.sub && \
     ./configure --prefix=/usr && \
     make && \
     make install && \
-    cd / && \
-    rm -rf /tmp/ta-lib* && \
     ldconfig
 
-# Install AWS CLI v2
-RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+# Move back to the main directory
+WORKDIR /opt/airflow
+
+# Install AWS CLI v2 (supports both x86_64 and aarch64)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"; \
+    else \
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"; \
+    fi && \
     unzip awscliv2.zip && \
     ./aws/install && \
     rm -rf awscliv2.zip aws
@@ -39,8 +48,8 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
 # Switch back to airflow user
 USER airflow
 
-# Set working directory
-WORKDIR /opt/airflow
+# Install the Python wrapper for TA-Lib
+RUN pip install TA-Lib
 
 # Copy requirements file first for better caching
 COPY --chown=airflow:root requirements.txt /opt/airflow/requirements.txt
@@ -56,9 +65,18 @@ COPY --chown=airflow:root configs/ /opt/airflow/configs/
 COPY --chown=airflow:root scripts/ /opt/airflow/scripts/
 COPY --chown=airflow:root spark_jobs/ /opt/airflow/spark_jobs/
 
+# Switch back to root user
+USER root
+
+# Clean up the TA-Lib source files
+RUN rm -R ta-lib ta-lib-0.4.0-src.tar.gz
+
 # Create necessary directories
 RUN mkdir -p /opt/airflow/data /opt/airflow/logs /opt/airflow/output && \
     chown -R airflow:root /opt/airflow/data /opt/airflow/logs /opt/airflow/output
+
+# Switch back to airflow user for security (docker-compose can override if needed)
+USER airflow
 
 # Set Python path to include project root
 ENV PYTHONPATH=/opt/airflow:$PYTHONPATH

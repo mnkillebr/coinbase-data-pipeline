@@ -1,2 +1,18 @@
-.venv/
+# Python-generated files
+*/__pycache__/
+*.pyc
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables
 .env
+
+.cursor
+
+# Generated Logs
+logs/*

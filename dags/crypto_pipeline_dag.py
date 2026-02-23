@@ -289,5 +289,6 @@ for granularity, granularity_config in GRANULARITIES.items():
             branch_task >> [update_result, collect_result]
             [update_result, collect_result] >> upload_result >> indicators_task >> risk_target_task >>upload_processed_result
     
-    # Make the DAG available to Airflow
-    globals()[f"dag_{granularity.lower()}"] = create_crypto_pipeline()
+    # Call to register the DAG with Airflow (2.4+ auto-registers; assigning to globals() for older discovery)
+    dag_instance = create_crypto_pipeline()
+    globals()[f"crypto_pipeline_{granularity.lower()}"] = dag_instance

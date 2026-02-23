@@ -23,13 +23,16 @@ def setup_logging():
         log_dir = Variable.get("LOG_DIR")
     except Exception as e:
         print(f"Error getting log directory from Airflow Variables: {e}")
-        config = dotenv_values(".env")
-
-        if not config.get("LOG_DIR"):
-            raise ValueError("LOG_DIR not found in Airflow Variables or environment")
-
-        log_dir = config["LOG_DIR"]
-        print(f"Using log directory from environment variables: {log_dir}")
+        # Prefer process environment (e.g. set by docker-compose); then .env if present; then default
+        log_dir = os.environ.get("LOG_DIR")
+        if not log_dir and os.path.isfile(".env"):
+            config = dotenv_values(".env")
+            log_dir = config.get("LOG_DIR")
+        if not log_dir:
+            log_dir = "/opt/airflow/logs"  # default so DAG parsing never fails in container
+            print(f"Using default log directory: {log_dir}")
+        else:
+            print(f"Using log directory from environment: {log_dir}")
 
     os.makedirs(log_dir, exist_ok=True)
     
@@ -63,17 +66,18 @@ def get_coinbase_client():
             logger.info("Successfully retrieved credentials from Airflow Variables")
         except Exception as e:
             logger.warning(f"Could not retrieve from Airflow Variables: {e}")
-            # Fallback to environment variables for local development
-            config = dotenv_values(".env")
-            
-            if not config.get("COINBASE_API_KEY_NAME"):
+            # Fallback: prefer process environment (e.g. docker-compose); then .env if present
+            api_key = os.environ.get("COINBASE_API_KEY_NAME")
+            api_secret = os.environ.get("COINBASE_API_PRIVATE_KEY")
+            if (not api_key or not api_secret) and os.path.isfile(".env"):
+                config = dotenv_values(".env")
+                api_key = api_key or config.get("COINBASE_API_KEY_NAME")
+                api_secret = api_secret or config.get("COINBASE_API_PRIVATE_KEY")
+            if not api_key:
                 raise ValueError("COINBASE_API_KEY_NAME not found in Airflow Variables or environment")
-            if not config.get("COINBASE_API_PRIVATE_KEY"):
+            if not api_secret:
                 raise ValueError("COINBASE_API_PRIVATE_KEY not found in Airflow Variables or environment")
-            
-            api_key = config["COINBASE_API_KEY_NAME"]
-            api_secret = config["COINBASE_API_PRIVATE_KEY"]
-            logger.info("Using credentials from environment variables")
+            logger.info("Using credentials from environment")
         
         # Create a new client instance
         client = RESTClient(api_key=api_key, api_secret=api_secret)

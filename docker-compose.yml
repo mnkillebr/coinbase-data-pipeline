@@ -8,14 +8,22 @@ x-airflow-common:
   image: coinbase-data-pipeline:latest
   environment:
     &airflow-common-env
-    # Airflow Core Configuration
-    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR:-LocalExecutor}
+    # Airflow Core Configuration (use CeleryExecutor + airflow-worker per official Docker docs)
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR:-CeleryExecutor}
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-airflow}
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    # Use container port 8080 for in-cluster calls (8095 is the host-mapped port)
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-api-server:8080/execution/'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
-    
+    # JWT secret must be identical on scheduler, api-server, and worker for execution API token verification
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow-docker-jwt-secret-change-me-in-production}
+
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+
     # Celery Configuration (if using CeleryExecutor)
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-airflow}
@@ -26,7 +34,7 @@ x-airflow-common:
     
     # Project-specific environment variables
     DATA_DIR: ${DATA_DIR:-/opt/airflow/data}
-    LOGS_DIR: ${LOGS_DIR:-/opt/airflow/logs}
+    LOG_DIR: ${LOG_DIR:-/opt/airflow/logs}
     SCRIPTS_DIR: ${SCRIPTS_DIR:-/opt/airflow/scripts}
     OUTPUT_DIR: ${OUTPUT_DIR:-/opt/airflow/output}
     
@@ -53,9 +61,6 @@ x-airflow-common:
     SPARK_APP_NAME: ${SPARK_APP_NAME:-crypto-candles-processor}
     SPARK_CONN_ID: ${SPARK_CONN_ID:-spark_default}
     
-    # Airflow Variables (can be set via environment or Airflow UI)
-    LOG_DIR: ${LOG_DIR:-/opt/airflow/logs}
-    
     # _PIP_ADDITIONAL_REQUIREMENTS: ''  # Uncomment if you need additional pip packages
   volumes:
     - ./dags:/opt/airflow/dags
@@ -81,10 +86,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-airflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
       POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    ports:
+      - "5438:5432"
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-airflow}"]
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-airflow}", "-d", "${POSTGRES_DB:-airflow}"]
       interval: 10s
       retries: 5
       timeout: 5s
@@ -107,9 +114,10 @@ services:
     <<: *airflow-common
     command: api-server
     ports:
-      - "${AIRFLOW_API_SERVER_PORT:-8095}:8095"
+      - "${AIRFLOW_API_SERVER_PORT:-8095}:8080"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8095/health"]
+      # Airflow 3 api-server has no /health; use an endpoint that returns 200
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -123,8 +131,60 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    environment:
+      <<: *airflow-common-env
+      AIRFLOW__LOGGING__LOGGING_LEVEL: "INFO"
     healthcheck:
       test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Airflow 3.x: DAG file parsing runs in a separate process. Without this, no DAGs are written to the DB.
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Worker: REQUIRED for CeleryExecutor. Tasks run here; without it task logs stay empty.
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-api-server:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Triggerer: needed for deferrable operators (e.g. some async sensors). Optional for basic DAGs.
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
       interval: 30s
       timeout: 10s
       retries: 5
@@ -144,7 +204,8 @@ services:
         function ver() {
           printf "%04d%04d%04d%04d" $${1//./ }
         }
-        airflow_version=$$(AIRFLOW__LOGGING__LOGGING_LEVEL=INFO && airflow version)
+        # Extract only the version number from airflow version output (handles multi-line output)
+        airflow_version=$$(AIRFLOW__LOGGING__LOGGING_LEVEL=INFO /entrypoint airflow version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
         airflow_version_comparable=$$(ver $${airflow_version})
         min_airflow_version=2.2.0
         min_airflow_version_comparable=$$(ver $${min_airflow_version})
@@ -197,7 +258,22 @@ services:
         fi
         mkdir -p /sources/logs /sources/dags /sources/plugins
         chown -R "$${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
-        exec /entrypoint airflow version
+        # Wait a moment for PostgreSQL to be fully ready (depends_on healthcheck ensures basic readiness)
+        echo "Waiting for database to be ready..."
+        sleep 3
+        # Initialize or upgrade database
+        echo "Setting up database schema..."
+        # Try upgrade first (if database already exists), then init if upgrade fails
+        /entrypoint airflow db upgrade 2>/dev/null || /entrypoint airflow db init || echo "Database setup completed or already initialized"
+        # Create admin user if it doesn't exist
+        echo "Creating admin user..."
+        /entrypoint airflow users create \
+          --username "$${_AIRFLOW_WWW_USER_USERNAME:-airflow}" \
+          --firstname "$${_AIRFLOW_WWW_USER_FIRSTNAME:-Airflow}" \
+          --lastname "$${_AIRFLOW_WWW_USER_LASTNAME:-Admin}" \
+          --role Admin \
+          --email "$${_AIRFLOW_WWW_USER_EMAIL:-airflow@example.com}" \
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD:-airflow}" || echo "User may already exist"
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
