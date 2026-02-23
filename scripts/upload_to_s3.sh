@@ -53,6 +53,7 @@ if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
     if [ -n "$AWS_DEFAULT_REGION" ]; then
         export AWS_DEFAULT_REGION
     fi
+    unset AWS_PROFILE
 elif [ -n "$AWS_PROFILE" ]; then
     # Use AWS profile if provided
     echo "Using AWS profile: $AWS_PROFILE"
