@@ -80,6 +80,16 @@ DAG_CONFIG = {
     "tags": ["crypto", "data-pipeline"]
 }
 
+# Redis Configuration (for pipeline data shared with other Docker services)
+# In Docker Airflow: REDIS_HOST=redis, REDIS_PORT=6379, REDIS_DB=0
+REDIS_CONFIG = {
+    "host": os.getenv("REDIS_HOST", "localhost"),
+    "port": int(os.getenv("REDIS_PORT", "6379") or "6379"),
+    "db": int(os.getenv("REDIS_DB", "0") or "0"),
+    "password": os.getenv("REDIS_PASSWORD") or None,
+    "history_limit": int(os.getenv("REDIS_INSIGHTS_HISTORY_LIMIT", "100") or "100"),
+}
+
 # Spark Configuration
 # Uses environment variables with sensible defaults
 SPARK_CONFIG = {

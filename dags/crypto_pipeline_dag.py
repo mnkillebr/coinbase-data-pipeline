@@ -13,14 +13,15 @@ from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOpe
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(parent_dir)
 from configs.crypto_pipeline_config import (
-    PRODUCTS, GRANULARITIES, AWS_CONFIG, PATHS, DAG_CONFIG, 
-    SPARK_CONFIG
+    PRODUCTS, GRANULARITIES, AWS_CONFIG, PATHS, DAG_CONFIG,
+    SPARK_CONFIG, REDIS_CONFIG
 )
 
 # Import the data collection functions from the project root
 from utils.collect_coinbase_data import collect_and_save_candles, update_existing_data, logger
 from utils.calculate_technical_indicators import calculate_and_save_indicators
 from utils.calculate_risk_target import calculate_risk_target_and_save
+from utils.store_crypto_insights import store_insights_from_parquet
 
 def get_environment_config():
     """Get configuration"""
@@ -198,6 +199,47 @@ def calculate_risk_target_task(product_id: str, granularity: str, indicators_out
         logger.error(f"Error calculating risk target for {product_id} {granularity}: {e}")
         raise
 
+@task
+def store_insights_task(product_id: str, granularity: str, risk_target_output_file: str):
+    """TaskFlow task to extract insights from processed data and store in Redis
+    
+    Args:
+        product_id: Product identifier (e.g., BTC-USD)
+        granularity: Time granularity (e.g., ONE_DAY)
+        risk_target_output_file: Path to parquet file from risk_target_task
+        
+    Returns:
+        Success message or raises exception on failure
+    """
+    try:
+        logger.info(f"Starting insights storage for {product_id} {granularity}")
+        logger.info(f"Using processed data file: {risk_target_output_file}")
+        
+        # Get history limit from config
+        history_limit = REDIS_CONFIG.get('history_limit', 100)
+        
+        # Store insights in Redis
+        success = store_insights_from_parquet(
+            parquet_file=risk_target_output_file,
+            product_id=product_id,
+            granularity=granularity,
+            history_limit=history_limit
+        )
+        
+        if success:
+            logger.info(f"Successfully stored insights for {product_id} {granularity} in Redis")
+            return f"Stored insights for {product_id} {granularity}"
+        else:
+            # Log warning but don't fail the task - Redis may be temporarily unavailable
+            logger.warning(f"Failed to store insights for {product_id} {granularity} - Redis may be unavailable")
+            return f"Warning: Failed to store insights for {product_id} {granularity} (Redis unavailable)"
+            
+    except Exception as e:
+        logger.error(f"Error storing insights for {product_id} {granularity}: {e}")
+        # Don't fail the DAG if Redis is unavailable - just log the error
+        logger.warning(f"Continuing DAG execution despite Redis storage failure: {e}")
+        return f"Error storing insights: {str(e)}"
+
 def create_spark_processing_task(product_id: str, granularity: str):
     """Create a SparkSubmitOperator task to process data with Spark"""
     config = get_environment_config()
@@ -285,12 +327,16 @@ for granularity, granularity_config in GRANULARITIES.items():
             
             # Create S3 upload task using TaskFlow for processed data (uses output from risk_target_task)
             upload_processed_result = upload_to_s3_processed_task(product_id, granularity, risk_target_task)
+
+            # Create insights storage task (uses output from risk_target_task)
+            store_insights_result = store_insights_task(product_id, granularity, risk_target_task)
             
             # Set up conditional dependencies:
             # Branch -> [update OR collect] -> upload -> spark
             branch_task >> [update_result, collect_result]
             # [update_result, collect_result] >> indicators_task >> risk_target_task
-            [update_result, collect_result] >> upload_result >> indicators_task >> risk_target_task >> upload_processed_result
+            [update_result, collect_result] >> upload_result >> indicators_task >> risk_target_task
+            risk_target_task >> [upload_processed_result, store_insights_result]
     
     # Call to register the DAG with Airflow (2.4+ auto-registers; assigning to globals() for older discovery)
     dag_instance = create_crypto_pipeline()
