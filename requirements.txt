@@ -52,6 +52,7 @@ cryptography
 cython
 deprecated
 dill
+discord-py
 dnspython
 email-validator
 fastapi

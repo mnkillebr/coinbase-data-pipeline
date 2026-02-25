@@ -8,7 +8,7 @@ import os
 import pendulum
 
 # Product IDs to collect data for
-PRODUCTS = ["BTC-USD", "ETH-USD"]
+PRODUCTS = ["BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD", "DOGE-USD", "ADA-USD", "LINK-USD"]
 
 # Timezone configuration
 TIMEZONE = "America/New_York"  # EST/EDT timezone
@@ -100,3 +100,11 @@ SPARK_CONFIG = {
     "conn_id": os.getenv("SPARK_CONN_ID", "spark_default")
 }
 
+# Discord Configuration
+DISCORD_CONFIG = {
+    "discord_token": os.getenv("DISCORD_TOKEN", ""),
+    "discord_fifteen_minute_channel_id": os.getenv("DISCORD_FIFTEEN_MINUTE_CHANNEL_ID", ""),
+    "discord_one_hour_channel_id": os.getenv("DISCORD_HOURLY_CHANNEL_ID", ""),
+    "discord_four_hour_channel_id": os.getenv("DISCORD_FOUR_HOUR_CHANNEL_ID", ""),
+    "discord_one_day_channel_id": os.getenv("DISCORD_DAILY_CHANNEL_ID", ""),
+}

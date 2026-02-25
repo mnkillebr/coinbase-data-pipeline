@@ -293,6 +293,50 @@ def extract_insights(df: pd.DataFrame, product_id: str, granularity: str) -> Dic
     return insights
 
 
+def get_insights_latest_key(product_id: str, granularity: str) -> str:
+    """
+    Return the Redis key used for the latest insights snapshot.
+    Matches the key structure used in store_insights_to_redis.
+
+    Args:
+        product_id: Product identifier (e.g., BTC-USD)
+        granularity: Time granularity (e.g., ONE_DAY)
+
+    Returns:
+        Redis key string, e.g. crypto:BTC_USD:one_day:latest
+    """
+    sanitized_product = product_id.replace("-", "_").replace("/", "_")
+    base_key = f"crypto:{sanitized_product}:{granularity.lower()}"
+    return f"{base_key}:latest"
+
+
+def format_insights_for_discord(insights: Dict[str, Any]) -> str:
+    """
+    Format insights dict into a Discord-suitable message string.
+
+    Args:
+        insights: Dictionary from extract_insights / Redis latest snapshot
+
+    Returns:
+        Formatted string for posting to Discord
+    """
+    parts = [
+        f"**{insights.get('product_id', 'N/A')}** ({insights.get('granularity', 'N/A')})",
+        f"Updated: {insights.get('last_updated', 'N/A')}",
+        f"Close: {insights.get('close_price')}",
+        f"Risk: {insights.get('risk_level', 'N/A')}",
+    ]
+    if insights.get("rsi_over_condition"):
+        parts.append(f"RSI: {insights['rsi_over_condition']}")
+    if insights.get("stoch_rsi_over_condition"):
+        parts.append(f"Stoch RSI: {insights['stoch_rsi_over_condition']}")
+    if insights.get("close_vs_kijun"):
+        parts.append(f"vs Kijun: {insights['close_vs_kijun']}")
+    if insights.get("trading_trending_sma_cross"):
+        parts.append(f"SMA cross: {insights['trading_trending_sma_cross']}")
+    return "\n".join(parts)
+
+
 def store_insights_to_redis(
     insights: Dict[str, Any],
     product_id: str,

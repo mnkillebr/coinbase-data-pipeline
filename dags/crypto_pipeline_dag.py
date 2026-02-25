@@ -4,24 +4,31 @@ Creates separate DAGs for each granularity with appropriate schedules.
 Each DAG processes all configured products for that granularity.
 """
 
+import json
 import os
 import sys
 from airflow.sdk import dag, task, get_current_context, TriggerRule
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+import discord
 
 # Import configuration from the root configs directory
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(parent_dir)
 from configs.crypto_pipeline_config import (
     PRODUCTS, GRANULARITIES, AWS_CONFIG, PATHS, DAG_CONFIG,
-    SPARK_CONFIG, REDIS_CONFIG
+    SPARK_CONFIG, REDIS_CONFIG, DISCORD_CONFIG
 )
 
 # Import the data collection functions from the project root
 from utils.collect_coinbase_data import collect_and_save_candles, update_existing_data, logger
 from utils.calculate_technical_indicators import calculate_and_save_indicators
 from utils.calculate_risk_target import calculate_risk_target_and_save
-from utils.store_crypto_insights import store_insights_from_parquet
+from utils.store_crypto_insights import (
+    store_insights_from_parquet,
+    get_insights_latest_key,
+    get_redis_client,
+    format_insights_for_discord,
+)
 
 def get_environment_config():
     """Get configuration"""
@@ -201,23 +208,26 @@ def calculate_risk_target_task(product_id: str, granularity: str, indicators_out
 
 @task
 def store_insights_task(product_id: str, granularity: str, risk_target_output_file: str):
-    """TaskFlow task to extract insights from processed data and store in Redis
-    
+    """TaskFlow task to extract insights from processed data and store in Redis.
+
+    Returns the Redis latest key so the Discord task can fetch insights.
+
     Args:
         product_id: Product identifier (e.g., BTC-USD)
         granularity: Time granularity (e.g., ONE_DAY)
         risk_target_output_file: Path to parquet file from risk_target_task
-        
+
     Returns:
-        Success message or raises exception on failure
+        Redis key for latest insights (e.g. crypto:BTC_USD:one_day:latest)
     """
+    redis_key = get_insights_latest_key(product_id, granularity)
     try:
         logger.info(f"Starting insights storage for {product_id} {granularity}")
         logger.info(f"Using processed data file: {risk_target_output_file}")
-        
+
         # Get history limit from config
         history_limit = REDIS_CONFIG.get('history_limit', 100)
-        
+
         # Store insights in Redis
         success = store_insights_from_parquet(
             parquet_file=risk_target_output_file,
@@ -225,21 +235,87 @@ def store_insights_task(product_id: str, granularity: str, risk_target_output_fi
             granularity=granularity,
             history_limit=history_limit
         )
-        
+
         if success:
             logger.info(f"Successfully stored insights for {product_id} {granularity} in Redis")
-            return f"Stored insights for {product_id} {granularity}"
         else:
-            # Log warning but don't fail the task - Redis may be temporarily unavailable
             logger.warning(f"Failed to store insights for {product_id} {granularity} - Redis may be unavailable")
-            return f"Warning: Failed to store insights for {product_id} {granularity} (Redis unavailable)"
-            
     except Exception as e:
         logger.error(f"Error storing insights for {product_id} {granularity}: {e}")
-        # Don't fail the DAG if Redis is unavailable - just log the error
         logger.warning(f"Continuing DAG execution despite Redis storage failure: {e}")
-        return f"Error storing insights: {str(e)}"
+    return redis_key
 
+
+def should_post_insights_to_discord(insights: dict) -> bool:
+    """Criteria for whether to post insights to Discord. Tune rules here."""
+    # Post if high risk, or RSI extreme (oversold/overbought), or stoch RSI extreme
+    if insights.get("risk_level") == "low risk" or insights.get("risk_level") == "very low risk":
+        return True
+    # Option: always post for testing; set to False and rely on rules above in production
+    return False
+
+
+@task(trigger_rule=TriggerRule.ONE_SUCCESS)
+def post_insights_to_discord_task(product_id: str, granularity: str, redis_key: str):
+    """TaskFlow task to post insights to Discord for a specific product and granularity.
+
+    Fetches insights from Redis by redis_key (returned by store_insights_task), formats them,
+    checks criteria; only posts when criteria are met. Uses discord.py client with on_ready.
+    """
+    try:
+        logger.info(f"Starting Discord post for {product_id} {granularity} (redis_key={redis_key})")
+
+        channel_id = DISCORD_CONFIG.get(f"discord_{granularity.lower()}_channel_id") or ""
+        token = (DISCORD_CONFIG.get("discord_token") or "").strip()
+        if not token or not channel_id:
+            logger.warning("Discord token or channel ID not set; skipping post")
+            return "Skipped: Discord token or channel ID not configured"
+
+        redis_client = get_redis_client()
+        if redis_client is None:
+            logger.warning("Redis client unavailable; cannot fetch insights for Discord")
+            return "Skipped: Redis unavailable"
+
+        raw = redis_client.get(redis_key)
+        if not raw:
+            logger.warning(f"No insights found at key {redis_key}; skipping post")
+            return f"Skipped: No insights at {redis_key}"
+
+        try:
+            insights = json.loads(raw)
+        except (TypeError, json.JSONDecodeError) as e:
+            logger.warning(f"Invalid JSON at {redis_key}: {e}; skipping post")
+            return "Skipped: Invalid insights JSON"
+
+        if not should_post_insights_to_discord(insights):
+            logger.info(f"Criteria not met for {product_id} {granularity}; not posting to Discord")
+            return "Skipped: Post criteria not met"
+
+        message_to_send = format_insights_for_discord(insights)
+        channel_id_int = int(channel_id)
+
+        intents = discord.Intents.default()
+        client = discord.Client(intents=intents)
+
+        @client.event
+        async def on_ready():
+            channel = client.get_channel(channel_id_int)
+            if channel is None:
+                logger.warning(f"Discord channel {channel_id_int} not found")
+                await client.close()
+                return
+            await channel.send(message_to_send)
+            await client.close()
+
+        client.run(token)
+        logger.info(f"Posted insights to Discord for {product_id} {granularity}")
+        return f"Posted insights to Discord for {product_id} {granularity}"
+
+    except Exception as e:
+        logger.error(f"Error posting insights to Discord for {product_id} {granularity}: {e}")
+        logger.warning(f"Continuing DAG execution despite Discord posting failure: {e}")
+        return f"Error posting insights to Discord: {str(e)}"
+    
 def create_spark_processing_task(product_id: str, granularity: str):
     """Create a SparkSubmitOperator task to process data with Spark"""
     config = get_environment_config()
@@ -330,13 +406,16 @@ for granularity, granularity_config in GRANULARITIES.items():
 
             # Create insights storage task (uses output from risk_target_task)
             store_insights_result = store_insights_task(product_id, granularity, risk_target_task)
-            
+            # Post insights to Discord (uses redis_key returned by store_insights_task)
+            discord_result = post_insights_to_discord_task(product_id, granularity, store_insights_result)
+
             # Set up conditional dependencies:
             # Branch -> [update OR collect] -> upload -> spark
             branch_task >> [update_result, collect_result]
             # [update_result, collect_result] >> indicators_task >> risk_target_task
             [update_result, collect_result] >> upload_result >> indicators_task >> risk_target_task
             risk_target_task >> [upload_processed_result, store_insights_result]
+            store_insights_result >> discord_result
     
     # Call to register the DAG with Airflow (2.4+ auto-registers; assigning to globals() for older discovery)
     dag_instance = create_crypto_pipeline()
