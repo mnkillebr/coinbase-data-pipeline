@@ -209,8 +209,21 @@ def extract_insights(df: pd.DataFrame, product_id: str, granularity: str) -> Dic
             sma_cross = "crossed above"  # Golden cross
         elif sma_14_prev >= sma_50_prev and sma_14_current < sma_50_current:
             sma_cross = "crossed below"  # Death cross
+
+    # 9. Trending SMA cross above/below Support/Resistance Average
+    sma_50_current_val = latest.get('sma_50', None)
+    sma_50_current = float(sma_50_current_val) if sma_50_current_val is not None and pd.notna(sma_50_current_val) else None
+    sma_138_prev_val = prev.get('sma_138', None) if prev is not None else None
+    sma_138_prev = float(sma_138_prev_val) if sma_138_prev_val is not None and pd.notna(sma_138_prev_val) else None
+    trending_cross = None
+    if sma_50_current is not None and sma_138_prev is not None and sma_50_prev is not None:
+        # Check for cross
+        if sma_50_prev <= sma_138_prev and sma_50_current > sma_138_current:
+            trending_cross = "crossed above"  # Golden cross
+        elif sma_50_prev >= sma_138_prev and sma_50_current < sma_138_current:
+            trending_cross = "crossed below"  # Death cross
     
-    # 9. Standard deviation between close price and SMA_138
+    # 10. Standard deviation between close price and SMA_138
     close_std_vs_sma138 = None
     if close_price is not None and sma_138_current is not None:
         # Calculate standard deviation of (close - sma_138) over recent period
@@ -221,13 +234,13 @@ def extract_insights(df: pd.DataFrame, product_id: str, granularity: str) -> Dic
                 diff = recent_data['close'] - recent_data['sma_138']
                 close_std_vs_sma138 = float(diff.std()) if pd.notna(diff.std()) else None
     
-    # 10. ATR and volume
+    # 11. ATR and volume
     atr_val = latest.get('atr', None)
     atr = float(atr_val) if atr_val is not None and pd.notna(atr_val) else None
     volume_val = latest.get('volume', None)
     volume = float(volume_val) if volume_val is not None and pd.notna(volume_val) else None
     
-    # 11. Summary statistics (24h and 7d)
+    # 12. Summary statistics (24h and 7d)
     stats_24h = {
         "avg_price": float(recent_24h['close'].mean()) if len(recent_24h) > 0 else None,
         "avg_volume": float(recent_24h['volume'].mean()) if len(recent_24h) > 0 else None,
@@ -277,7 +290,10 @@ def extract_insights(df: pd.DataFrame, product_id: str, granularity: str) -> Dic
         # 8. SMA_14 cross
         "trading_trending_sma_cross": sma_cross,
         
-        # 9. Standard deviation between close and SMA_138
+        # 9. Trending SMA cross above/below Support/Resistance Average
+        "trending_support_resistance_cross": trending_cross,
+        
+        # 10. Standard deviation between close and SMA_138
         "close_std_vs_sma138": close_std_vs_sma138,
         
         # 10. ATR and volume
@@ -321,19 +337,26 @@ def format_insights_for_discord(insights: Dict[str, Any]) -> str:
         Formatted string for posting to Discord
     """
     parts = [
-        f"**{insights.get('product_id', 'N/A')}** ({insights.get('granularity', 'N/A')})",
+        f"**🚨 {insights.get('product_id', 'N/A')}** ({insights.get('granularity', 'N/A')}) - Trade Signal\n",
+        f"Date: {insights.get('date', 'N/A')}",
         f"Updated: {insights.get('last_updated', 'N/A')}",
         f"Close: {insights.get('close_price')}",
         f"Risk: {insights.get('risk_level', 'N/A')}",
     ]
+    if insights.get("trending_sma_50_inflection"):
+        parts.append(f"Trending Average: {insights['trending_sma_50_inflection']}")
+    if insights.get("support_resistance_sma_inflection"):
+        parts.append(f"Support/Resistance Average: {insights['support_resistance_sma_inflection']}")
     if insights.get("rsi_over_condition"):
         parts.append(f"RSI: {insights['rsi_over_condition']}")
     if insights.get("stoch_rsi_over_condition"):
         parts.append(f"Stoch RSI: {insights['stoch_rsi_over_condition']}")
     if insights.get("close_vs_kijun"):
-        parts.append(f"vs Kijun: {insights['close_vs_kijun']}")
+        parts.append(f"Close vs Kijun: {insights['close_vs_kijun']}")
     if insights.get("trading_trending_sma_cross"):
         parts.append(f"SMA cross: {insights['trading_trending_sma_cross']}")
+    if insights.get("trending_support_resistance_cross"):
+        parts.append(f"Trending Support/Resistance Cross: {insights['trending_support_resistance_cross']}\n")
     return "\n".join(parts)
 
 
