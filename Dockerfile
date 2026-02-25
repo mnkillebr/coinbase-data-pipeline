@@ -7,8 +7,11 @@ USER root
 # Set working directory
 WORKDIR /opt/airflow
 
+# Prevent interactive prompts during build (important for CI/VPS)
+ENV DEBIAN_FRONTEND=noninteractive
+
 # Install build dependencies and download TA-Lib C source
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     wget \
     curl \
@@ -16,8 +19,9 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
-    tar -xvf ta-lib-0.4.0-src.tar.gz
+# Download TA-Lib (retries and timeout for flaky networks / VPS)
+RUN wget --tries=3 --timeout=60 -q http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz -O ta-lib-0.4.0-src.tar.gz && \
+    tar -xf ta-lib-0.4.0-src.tar.gz
 
 # Compile and install the TA-Lib C library
 # Update config.guess and config.sub to support ARM64 (Apple Silicon)
