@@ -340,7 +340,7 @@ def format_insights_for_discord(insights: Dict[str, Any]) -> str:
         f"**🚨 {insights.get('product_id', 'N/A')}** ({insights.get('granularity', 'N/A')}) - Trade Signal\n",
         f"Date: {insights.get('date', 'N/A')}",
         f"Updated: {insights.get('last_updated', 'N/A')}",
-        f"Close: {insights.get('close_price')}",
+        f"Close Price: {insights.get('close_price')}",
         f"Risk: {insights.get('risk_level', 'N/A')}",
     ]
     if insights.get("trending_sma_50_inflection"):
@@ -356,7 +356,8 @@ def format_insights_for_discord(insights: Dict[str, Any]) -> str:
     if insights.get("trading_trending_sma_cross"):
         parts.append(f"SMA cross: {insights['trading_trending_sma_cross']}")
     if insights.get("trending_support_resistance_cross"):
-        parts.append(f"Trending Support/Resistance Cross: {insights['trending_support_resistance_cross']}\n")
+        parts.append(f"Trending Support/Resistance Cross: {insights['trending_support_resistance_cross']}")
+    parts.append("\n")
     return "\n".join(parts)
 
 

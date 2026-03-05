@@ -249,7 +249,7 @@ def store_insights_task(product_id: str, granularity: str, risk_target_output_fi
 def should_post_insights_to_discord(insights: dict) -> bool:
     """Criteria for whether to post insights to Discord. Tune rules here."""
     # Post if high risk, or RSI extreme (oversold/overbought), or stoch RSI extreme
-    if insights.get("risk_level") == "low risk" or insights.get("risk_level") == "very low risk":
+    if insights.get("risk_level") == "very low risk":
         return True
     if insights.get("trending_support_resistance_cross") == "crossed above":
         return True
