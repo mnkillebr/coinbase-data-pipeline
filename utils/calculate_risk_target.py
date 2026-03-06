@@ -425,6 +425,72 @@ def add_risk_target(df: pd.DataFrame,
 
 		return df
 
+
+def read_parquet_tail(filepath: str, n_rows: int) -> pd.DataFrame:
+    """
+    Read the last n_rows from a parquet file. For small files (<= n_rows) reads fully.
+    For larger files uses pyarrow to read only the last row groups to bound memory.
+    """
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Input file not found: {filepath}")
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        # Fallback: read full and tail (memory = full file)
+        df = pd.read_parquet(filepath)
+        return df.tail(n_rows) if len(df) > n_rows else df
+
+    pf = pq.ParquetFile(filepath)
+    total_rows = pf.metadata.num_rows
+    if total_rows <= n_rows:
+        return pf.read().to_pandas()
+    # Read only the last row groups that contain at least n_rows
+    rows_needed = n_rows
+    row_groups_to_read = []
+    for i in range(pf.metadata.num_row_groups - 1, -1, -1):
+        row_groups_to_read.append(i)
+        rows_in_groups = sum(pf.metadata.row_group(rg).num_rows for rg in row_groups_to_read)
+        if rows_in_groups >= n_rows:
+            break
+    row_groups_to_read.reverse()
+    table = pf.read_row_groups(row_groups_to_read)
+    df = table.to_pandas()
+    return df.tail(n_rows)
+
+
+def calculate_risk_target_and_save_tail_only(
+    product_id: str,
+    granularity: str,
+    input_file: str,
+    output_file: str,
+    tail_rows: int = 2500,
+) -> str:
+    """
+    Read only the last tail_rows from the indicators parquet, add risk target, overwrite output.
+    Memory-bounded when used with tail-only indicators output (small parquet).
+    """
+    logger.info(f"Starting tail-only risk target calculation for {product_id} {granularity}")
+    df = read_parquet_tail(input_file, tail_rows)
+    logger.info(f"Loaded last {len(df)} records from {input_file}")
+    # Same validation as calculate_risk_target_and_save
+    required_base = ["date", "start", "open", "high", "low", "close", "volume"]
+    required_tech = [
+        "rsi", "rsi_lag1", "rsi_lag2", "rsi_lag3", "rsi_pct",
+        "macd", "atr", "sma_14", "sma_50", "sma_138", "kijun_v2_200_1",
+        "es_stoch_rsi_k", "es_stoch_rsi_d",
+    ]
+    for col in required_base + required_tech:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column: {col}")
+    df_processed = add_risk_target(df)
+    output_dir = os.path.dirname(output_file)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+    df_processed.to_parquet(output_file, compression="snappy", index=False)
+    logger.info(f"✓ Saved {len(df_processed)} records to {output_file}")
+    return output_file
+
+
 def calculate_risk_target_and_save(product_id: str, granularity: str, input_file: str, output_file: str) -> str:
     """
     Load parquet data (with technical indicators), calculate risk target, and save to parquet.

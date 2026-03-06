@@ -21,8 +21,9 @@ from configs.crypto_pipeline_config import (
 
 # Import the data collection functions from the project root
 from utils.collect_coinbase_data import collect_and_save_candles, update_existing_data, logger
-from utils.calculate_technical_indicators import calculate_and_save_indicators
-from utils.calculate_risk_target import calculate_risk_target_and_save
+from utils.calculate_technical_indicators import calculate_and_save_indicators_tail_only
+from utils.calculate_risk_target import calculate_risk_target_and_save_tail_only
+from utils.pipeline_state import get_last_start, set_last_start, read_last_line_csv
 from utils.store_crypto_insights import (
     store_insights_from_parquet,
     get_insights_latest_key,
@@ -58,7 +59,19 @@ def check_data_exists_branch(product_id: str, granularity: str):
 
         exists = os.path.exists(filepath)
         logger.info(f"Data file check for {product_id} {granularity}: {'EXISTS' if exists else 'NOT FOUND'}")
-        
+
+        # Optionally seed Redis last_start when file exists so update_data_task can use it
+        if exists:
+            try:
+                redis_client = get_redis_client()
+                if redis_client and get_last_start(redis_client, product_id, granularity) is None:
+                    last_ts = read_last_line_csv(filepath)
+                    if last_ts is not None:
+                        set_last_start(redis_client, product_id, granularity, last_ts)
+                        logger.info(f"Seeded Redis last_start for {product_id} {granularity}")
+            except Exception as e:
+                logger.warning(f"Could not seed Redis in branch: {e}")
+
         if exists:
             return f"update_data_task{task_suffix}" if task_suffix else "update_data_task"
         else:
@@ -131,7 +144,7 @@ def upload_to_s3_task(product_id: str, granularity: str):
     return f"{script_path} {local_file} {s3_path}"
 
 
-@task
+@task(trigger_rule=TriggerRule.ONE_SUCCESS)
 def calculate_technical_indicators_task(product_id: str, granularity: str):
     """TaskFlow task to calculate technical indicators for a specific product and granularity"""
     config = get_environment_config()
@@ -150,12 +163,13 @@ def calculate_technical_indicators_task(product_id: str, granularity: str):
         
         output_file = f"{output_dir}/{sanitized_product}_{granularity.lower()}.parquet"
         
-        # Calculate and save indicators
-        result_file = calculate_and_save_indicators(
+        # Tail-only: read last 2500 rows, compute indicators, overwrite parquet (memory-bounded)
+        result_file = calculate_and_save_indicators_tail_only(
             product_id=product_id,
             granularity=granularity,
             input_file=input_file,
-            output_file=output_file
+            output_file=output_file,
+            tail_rows=2500,
         )
         
         logger.info(f"Successfully calculated indicators for {product_id} {granularity}")
@@ -192,12 +206,13 @@ def calculate_risk_target_task(product_id: str, granularity: str, indicators_out
         # Or we can overwrite the same file since it will have additional columns
         output_file = f"{output_dir}/{sanitized_product}_{granularity.lower()}.parquet"
         
-        # Calculate and save risk target (input is the parquet file from indicators task)
-        result_file = calculate_risk_target_and_save(
+        # Tail-only: read last 2500 rows from indicators parquet, add risk target, overwrite (memory-bounded)
+        result_file = calculate_risk_target_and_save_tail_only(
             product_id=product_id,
             granularity=granularity,
             input_file=indicators_output_file,
-            output_file=output_file
+            output_file=output_file,
+            tail_rows=2500,
         )
         
         logger.info(f"Successfully calculated risk target for {product_id} {granularity}")
@@ -414,10 +429,10 @@ for granularity, granularity_config in GRANULARITIES.items():
             discord_result = post_insights_to_discord_task(product_id, granularity, store_insights_result)
 
             # Set up conditional dependencies:
-            # Branch -> [update OR collect] -> upload -> spark
+            # Branch -> [update OR collect]; indicators no longer wait for S3 upload
             branch_task >> [update_result, collect_result]
-            # [update_result, collect_result] >> indicators_task >> risk_target_task
-            [update_result, collect_result] >> upload_result >> indicators_task >> risk_target_task
+            [update_result, collect_result] >> upload_result
+            [update_result, collect_result] >> indicators_task >> risk_target_task
             risk_target_task >> [upload_processed_result, store_insights_result]
             store_insights_result >> discord_result
     

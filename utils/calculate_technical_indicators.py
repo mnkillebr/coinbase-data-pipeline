@@ -3,7 +3,11 @@ Calculate technical indicators for crypto candle data.
 This module processes CSV files and adds technical indicator columns using pandas and talib.
 """
 
+import io
 import os
+import subprocess
+from typing import List, Optional
+
 import pandas as pd
 import numpy as np
 import talib
@@ -322,6 +326,105 @@ def process_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     logger.info(f"Processing complete. Output will have {final_count} records")
     
     return df
+
+
+def read_csv_tail(
+    filepath: str,
+    n_rows: int,
+    required_columns: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """
+    Read the last n_rows rows of a CSV without loading the full file.
+    Uses tail (or seek-from-end fallback) for O(1) memory in line count.
+
+    Args:
+        filepath: Path to CSV file
+        n_rows: Number of data rows to read from the end
+        required_columns: Optional list of required column names (default: standard OHLCV + date, start)
+
+    Returns:
+        DataFrame with the last n_rows rows (or fewer if file has fewer)
+    """
+    if required_columns is None:
+        required_columns = ["date", "start", "open", "high", "low", "close", "volume"]
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"Input file not found: {filepath}")
+
+    # Read header (first line)
+    with open(filepath, "r", encoding="utf-8") as f:
+        header = f.readline()
+
+    # Read last n_rows lines (data only)
+    try:
+        result = subprocess.run(
+            ["tail", "-n", str(n_rows), filepath],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise IOError(f"tail failed: {result.stderr}")
+        tail_content = result.stdout
+    except FileNotFoundError:
+        # tail not available (e.g. Windows): read file from end
+        with open(filepath, "rb") as f:
+            size = os.path.getsize(filepath)
+            chunk_size = min(512 * 1024, size)  # 512KB or file size
+            f.seek(max(0, size - chunk_size))
+            raw = f.read().decode("utf-8", errors="ignore")
+        lines = raw.split("\n")
+        tail_content = "\n".join(lines[-n_rows:]) if len(lines) >= n_rows else raw
+
+    # When file has fewer than n_rows lines, tail returns the whole file including header.
+    # Strip that header from tail so we don't have a duplicate header row parsed as data.
+    tail_lines = tail_content.strip().split("\n")
+    if tail_lines and tail_lines[0].strip() == header.strip():
+        tail_lines = tail_lines[1:]
+    tail_content = "\n".join(tail_lines)
+
+    combined = header.strip() + "\n" + tail_content.strip()
+    if not combined.strip():
+        return pd.DataFrame(columns=required_columns)
+
+    df = pd.read_csv(io.StringIO(combined))
+    missing = [c for c in required_columns if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+    return df
+
+
+def calculate_and_save_indicators_tail_only(
+    product_id: str,
+    granularity: str,
+    input_file: str,
+    output_file: str,
+    tail_rows: int = 2500,
+) -> str:
+    """
+    Read only the last tail_rows of CSV, compute indicators, overwrite parquet.
+    Memory-bounded; does not load full CSV. Use for scheduled DAG runs.
+
+    Returns:
+        Path to output parquet file.
+    """
+    logger.info(f"Starting tail-only technical indicator calculation for {product_id} {granularity}")
+    logger.info(f"Input file: {input_file}, tail_rows: {tail_rows}")
+
+    df = read_csv_tail(input_file, n_rows=tail_rows)
+    logger.info(f"Loaded last {len(df)} records")
+
+    df_processed = process_technical_indicators(df)
+
+    output_dir = os.path.dirname(output_file)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+
+    df_processed.to_parquet(output_file, compression="snappy", index=False)
+    if not os.path.exists(output_file):
+        raise IOError(f"Failed to save output file: {output_file}")
+
+    logger.info(f"✓ Saved {len(df_processed)} records to {output_file}")
+    return output_file
 
 
 def calculate_and_save_indicators(product_id: str, granularity: str, input_file: str, output_file: str) -> str:

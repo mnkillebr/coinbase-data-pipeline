@@ -8,6 +8,13 @@ from datetime import datetime, timedelta
 from coinbase.rest import RESTClient
 from dotenv import dotenv_values
 
+from utils.pipeline_state import (
+    get_last_start,
+    set_last_start,
+    read_last_line_csv,
+)
+from utils.store_crypto_insights import get_redis_client
+
 # Remove module-level client initialization - will be created in functions
 
 rate_limit = 10000 # 10000 requests per hour
@@ -144,7 +151,7 @@ def get_last_closed_candle_time(granularity: str):
         return now_est
 
 def get_last_candle_from_file(filepath: str):
-    """Get the timestamp of the last candle from an existing CSV file"""
+    """Get the timestamp of the last candle from an existing CSV file (full read; prefer Redis + read_last_line_csv in update path)."""
     try:
         if os.path.exists(filepath):
             df = pd.read_csv(filepath)
@@ -157,6 +164,43 @@ def get_last_candle_from_file(filepath: str):
     except Exception as e:
         logger.error(f"Error reading last candle from {filepath}: {e}")
         return None
+
+
+def _format_candle_row(candle: dict, granularity: str) -> str:
+    """Format a single candle as a CSV row: date,start,open,high,low,close,volume."""
+    start_ts = int(candle["start"])
+    numeric_cols = ["start", "open", "high", "low", "close", "volume"]
+    if granularity == "ONE_DAY":
+        date_str = datetime.fromtimestamp(start_ts + 86400, tz=pytz.UTC).astimezone(pytz.timezone("US/Eastern")).strftime("%Y-%m-%d %H:%M:%S %Z")
+    else:
+        date_str = datetime.fromtimestamp(start_ts, tz=pytz.UTC).astimezone(pytz.timezone("US/Eastern")).strftime("%Y-%m-%d %H:%M:%S %Z")
+    parts = [date_str, str(start_ts)]
+    for col in numeric_cols[1:]:
+        parts.append(str(candle.get(col, "")))
+    return ",".join(parts)
+
+
+def append_new_candles_append_only(filepath: str, new_candles: list, granularity: str) -> bool:
+    """
+    Append new candles to CSV without reading the full file.
+    Writes only new rows in append mode. Caller must ensure no duplicate start timestamps.
+    """
+    if not new_candles:
+        logger.info("No new candles to append")
+        return True
+    try:
+        write_header = not os.path.exists(filepath) or os.path.getsize(filepath) == 0
+        with open(filepath, "a", encoding="utf-8", newline="") as f:
+            if write_header:
+                f.write("date,start,open,high,low,close,volume\n")
+            for candle in new_candles:
+                f.write(_format_candle_row(candle, granularity) + "\n")
+        logger.info(f"Appended {len(new_candles)} rows to {filepath}")
+        return True
+    except Exception as e:
+        logger.error(f"Error appending candles to {filepath}: {e}")
+        return False
+
 
 def append_new_candles_to_file(filepath: str, new_candles: list, granularity: str):
     """Append new candles to an existing CSV file"""
@@ -249,13 +293,18 @@ def update_existing_data(product_id: str, granularity: str, data_dir: str):
     filepath = os.path.join(data_dir, existing_files[0])
     
     logger.info(f"Found existing file: {filepath}")
-    
-    # Get the last candle timestamp from the file
-    last_timestamp = get_last_candle_from_file(filepath)
+
+    # Get last candle timestamp: Redis first, then last-line CSV (O(1)), then full-file fallback
+    redis_client = get_redis_client()
+    last_timestamp = get_last_start(redis_client, product_id, granularity)
+    if last_timestamp is None:
+        last_timestamp = read_last_line_csv(filepath)
+    if last_timestamp is None:
+        last_timestamp = get_last_candle_from_file(filepath)
     if last_timestamp is None:
         logger.error(f"Could not read last timestamp from {filepath}")
         return False
-    
+
     # Calculate the start time for new data (next period after last candle)
     # Convert to UTC timezone-aware datetime to match get_last_closed_candle_time output
     last_candle_time = datetime.fromtimestamp(last_timestamp, tz=pytz.UTC)
@@ -384,10 +433,19 @@ def update_existing_data(product_id: str, granularity: str, data_dir: str):
         if filtered_candles:
             logger.info(f"Total candles collected: {len(all_new_candles)}")
             logger.info(f"Total candles after filtering: {len(filtered_candles)}")
-            
-            # Append all new candles to existing file
-            success = append_new_candles_to_file(filepath, filtered_candles, granularity)
+
+            # Optional duplicate check: skip append if we already have this data (e.g. retry)
+            first_new_start = int(filtered_candles[0]["start"])
+            if redis_client and get_last_start(redis_client, product_id, granularity) is not None:
+                if first_new_start <= get_last_start(redis_client, product_id, granularity):
+                    logger.info(f"Skipping append (data already present for {product_id} {granularity})")
+                    return True
+
+            # Append only new rows (no full file read)
+            success = append_new_candles_append_only(filepath, filtered_candles, granularity)
             if success:
+                last_start_appended = int(filtered_candles[-1]["start"])
+                set_last_start(redis_client, product_id, granularity, last_start_appended)
                 logger.info(f"Successfully updated {product_id} {granularity} with {len(filtered_candles)} new candles")
                 return True
             else:
