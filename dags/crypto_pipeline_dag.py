@@ -7,9 +7,11 @@ Each DAG processes all configured products for that granularity.
 import json
 import os
 import sys
+from datetime import datetime, timedelta
 from airflow.sdk import dag, task, get_current_context, TriggerRule
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 import discord
+import pytz
 
 # Import configuration from the root configs directory
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -261,6 +263,58 @@ def store_insights_task(product_id: str, granularity: str, risk_target_output_fi
     return redis_key
 
 
+def get_granularity_window_minutes(granularity: str) -> int:
+    """Return the candle duration in minutes for a granularity."""
+    return {
+        "FIFTEEN_MINUTE": 15,
+        "ONE_HOUR": 60,
+        "FOUR_HOUR": 240,
+        "ONE_DAY": 24 * 60,
+    }.get(granularity, 15)
+
+
+def _parse_signal_date(insights: dict):
+    """
+    Parse the signal (candle) date from insights.
+    Returns timezone-aware datetime in US/Eastern, or None if unparseable.
+    insights['date'] can be a string like '2026-03-05 14:30:00 EST' or a numeric Unix timestamp (candle start).
+    """
+    raw = insights.get("date")
+    if raw is None:
+        return None
+    eastern = pytz.timezone("US/Eastern")
+    try:
+        if isinstance(raw, (int, float)):
+            # Unix timestamp (candle start)
+            return datetime.fromtimestamp(int(raw), tz=pytz.UTC).astimezone(eastern)
+        s = str(raw).strip()
+        # Parse "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS" (first 19 chars; ignore timezone suffix)
+        if len(s) >= 19:
+            s19 = s[:19].replace("T", " ")
+            dt_naive = datetime.strptime(s19, "%Y-%m-%d %H:%M:%S")
+            return eastern.localize(dt_naive)
+        return None
+    except Exception:
+        return None
+
+
+def is_signal_fresh_for_discord(insights: dict, granularity: str) -> bool:
+    """
+    Return True only if the signal's candle just closed within the current granularity window.
+    So we post only in the cron run immediately after the candle close (e.g. 14:31 for a 14:30 close).
+    Signal date in insights is the candle *start*; we post if now is in [candle_close, candle_close + window).
+    """
+    signal_start = _parse_signal_date(insights)
+    if signal_start is None:
+        return False
+    window_minutes = get_granularity_window_minutes(granularity)
+    eastern = pytz.timezone("US/Eastern")
+    now = datetime.now(eastern)
+    candle_close = signal_start + timedelta(minutes=window_minutes)
+    window_end = candle_close + timedelta(minutes=window_minutes)
+    return candle_close <= now < window_end
+
+
 def should_post_insights_to_discord(insights: dict) -> bool:
     """Criteria for whether to post insights to Discord. Tune rules here."""
     # Post if high risk, or RSI extreme (oversold/overbought), or stoch RSI extreme
@@ -309,6 +363,13 @@ def post_insights_to_discord_task(product_id: str, granularity: str, redis_key: 
         if not should_post_insights_to_discord(insights):
             logger.info(f"Criteria not met for {product_id} {granularity}; not posting to Discord")
             return "Skipped: Post criteria not met"
+
+        if not is_signal_fresh_for_discord(insights, granularity):
+            logger.info(
+                f"Signal date is outside granularity window for {product_id} {granularity}; "
+                "not posting to Discord (only post when signal and run time coincide)"
+            )
+            return "Skipped: Signal date outside granularity window"
 
         message_to_send = format_insights_for_discord(insights)
         channel_id_int = int(channel_id)
