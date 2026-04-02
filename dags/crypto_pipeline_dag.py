@@ -6,7 +6,10 @@ Each DAG processes all configured products for that granularity.
 
 import json
 import os
+import re
 import sys
+
+import pendulum
 from airflow.sdk import dag, task, get_current_context, TriggerRule
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 import discord
@@ -15,8 +18,15 @@ import discord
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(parent_dir)
 from configs.crypto_pipeline_config import (
-    PRODUCTS, GRANULARITIES, AWS_CONFIG, PATHS, DAG_CONFIG,
-    SPARK_CONFIG, REDIS_CONFIG, DISCORD_CONFIG
+    PRODUCTS,
+    GRANULARITIES,
+    AWS_CONFIG,
+    PATHS,
+    DAG_CONFIG,
+    SPARK_CONFIG,
+    REDIS_CONFIG,
+    DISCORD_CONFIG,
+    TIMEZONE,
 )
 
 # Import the data collection functions from the project root
@@ -247,24 +257,85 @@ def store_insights_task(product_id: str, granularity: str, risk_target_output_fi
 
 
 def should_post_insights_to_discord(insights: dict) -> bool:
-    """Criteria for whether to post insights to Discord. Tune rules here."""
-    # Post if high risk, or RSI extreme (oversold/overbought), or stoch RSI extreme
+    """Signal content rules for Discord. Tune here.
+
+    Posts only when one of these is true (see also is_insight_in_fresh_post_window).
+    """
     if insights.get("risk_level") == "very low risk":
         return True
     if insights.get("trending_support_resistance_cross") == "crossed above":
         return True
     if insights.get("trending_support_resistance_cross") == "crossed below":
         return True
-    # Option: always post for testing; set to False and rely on rules above in production
     return False
+
+
+# Coinbase CSV `date`: candle start for intraday; for ONE_DAY, start + 24h (displayed close instant).
+_GRANULARITY_PERIOD_KWARGS = {
+    "FIFTEEN_MINUTE": {"minutes": 15},
+    "ONE_HOUR": {"hours": 1},
+    "FOUR_HOUR": {"hours": 4},
+    "ONE_DAY": {"days": 1},
+}
+
+
+def _parse_insight_datetime(value) -> pendulum.DateTime | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        # Coinbase CSV dates look like "2026-03-05 14:30:00 EST"; pendulum.parse rejects EST/EDT.
+        m = re.match(r"^(.+?)\s+(EST|EDT)\s*$", s)
+        if m:
+            return pendulum.from_format(
+                m.group(1).strip(), "YYYY-MM-DD HH:mm:ss", tz=TIMEZONE
+            )
+        dt = pendulum.parse(s)
+        if dt is None:
+            return None
+        if dt.timezone is None:
+            dt = dt.in_timezone(TIMEZONE)
+        return dt
+    except Exception:
+        return None
+
+
+def is_insight_in_fresh_post_window(insights: dict, granularity: str) -> bool:
+    """True only for the first granularity-length window after the signal candle closes.
+
+    Avoids posting stale rows (e.g. March 5 candle reposted on March 9) when criteria
+    still match on an old latest row.
+    """
+    period_kw = _GRANULARITY_PERIOD_KWARGS.get(granularity)
+    if not period_kw:
+        return False
+
+    anchor = _parse_insight_datetime(insights.get("date"))
+    if anchor is None:
+        logger.warning("Discord freshness: could not parse insights['date']; skipping post")
+        return False
+
+    period = pendulum.duration(**period_kw)
+    if granularity == "ONE_DAY":
+        candle_close = anchor
+    else:
+        candle_close = anchor + period
+
+    updated = _parse_insight_datetime(insights.get("last_updated"))
+    now = updated if updated is not None else pendulum.now(TIMEZONE)
+
+    window_end = candle_close + period
+    return candle_close <= now < window_end
 
 
 @task(trigger_rule=TriggerRule.ONE_SUCCESS)
 def post_insights_to_discord_task(product_id: str, granularity: str, redis_key: str):
     """TaskFlow task to post insights to Discord for a specific product and granularity.
 
-    Fetches insights from Redis by redis_key (returned by store_insights_task), formats them,
-    checks criteria; only posts when criteria are met. Uses discord.py client with on_ready.
+    Fetches insights from Redis, then posts only if (1) should_post_insights_to_discord and
+    (2) is_insight_in_fresh_post_window — i.e. content rules plus candle aligned with run time.
     """
     try:
         logger.info(f"Starting Discord post for {product_id} {granularity} (redis_key={redis_key})")
@@ -294,6 +365,13 @@ def post_insights_to_discord_task(product_id: str, granularity: str, redis_key: 
         if not should_post_insights_to_discord(insights):
             logger.info(f"Criteria not met for {product_id} {granularity}; not posting to Discord")
             return "Skipped: Post criteria not met"
+
+        if not is_insight_in_fresh_post_window(insights, granularity):
+            logger.info(
+                f"Discord freshness: signal candle outside post window for {product_id} "
+                f"{granularity} (date={insights.get('date')}); not posting"
+            )
+            return "Skipped: Signal not in fresh post window for granularity"
 
         message_to_send = format_insights_for_discord(insights)
         channel_id_int = int(channel_id)
