@@ -492,10 +492,9 @@ for granularity, granularity_config in GRANULARITIES.items():
             discord_result = post_insights_to_discord_task(product_id, granularity, store_insights_result)
 
             # Set up conditional dependencies:
-            # Branch -> [update OR collect] -> upload -> spark
             branch_task >> [update_result, collect_result]
-            # [update_result, collect_result] >> indicators_task >> risk_target_task
-            [update_result, collect_result] >> upload_result >> indicators_task >> risk_target_task
+            [update_result, collect_result] >> upload_result
+            [update_result, collect_result] >> indicators_task >> risk_target_task
             risk_target_task >> [upload_processed_result, store_insights_result]
             store_insights_result >> discord_result
     
