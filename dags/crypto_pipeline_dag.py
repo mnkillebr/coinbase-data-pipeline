@@ -141,7 +141,7 @@ def upload_to_s3_task(product_id: str, granularity: str):
     return f"{script_path} {local_file} {s3_path}"
 
 
-@task
+@task(trigger_rule=TriggerRule.ONE_SUCCESS)
 def calculate_technical_indicators_task(product_id: str, granularity: str):
     """TaskFlow task to calculate technical indicators for a specific product and granularity"""
     config = get_environment_config()
