@@ -1,8 +1,10 @@
+import csv
 import os
 import pandas as pd
 import time
 import math
 import pytz
+from io import StringIO
 import logging
 from datetime import datetime, timedelta
 from coinbase.rest import RESTClient
@@ -143,17 +145,80 @@ def get_last_closed_candle_time(granularity: str):
         # Default to current time for unknown granularities
         return now_est
 
-def get_last_candle_from_file(filepath: str):
-    """Get the timestamp of the last candle from an existing CSV file"""
-    try:
-        if os.path.exists(filepath):
-            df = pd.read_csv(filepath)
-            if not df.empty:
-                # Ensure 'start' column is integer type and get the last timestamp
-                df['start'] = df['start'].astype(int)
-                last_timestamp = df['start'].iloc[-1]
-                return int(last_timestamp)
+# Bytes to read from EOF when resolving the last CSV row without loading the full file.
+_LAST_ROW_TAIL_SCAN_INITIAL = 8192
+_LAST_ROW_TAIL_SCAN_MAX = 4 * 1024 * 1024
+
+
+def _read_csv_header_line(filepath: str) -> str | None:
+    """First line of the file (header). utf-8-sig matches pandas.read_csv BOM handling."""
+    with open(filepath, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
+        line = f.readline()
+    if not line:
         return None
+    return line.rstrip("\r\n")
+
+
+def _tail_file_lines(filepath: str, max_scan_bytes: int) -> tuple[list[str], bool, int]:
+    """Read up to max_scan_bytes from EOF; split on newlines (normalized). Returns (lines, read_entire_file, file_size)."""
+    with open(filepath, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+        if file_size == 0:
+            return [], True, 0
+        n = min(max_scan_bytes, file_size)
+        f.seek(file_size - n)
+        data = f.read(n)
+    text = data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    return lines, n == file_size, file_size
+
+
+def _last_non_header_csv_line_from_tail(
+    filepath: str, header_line: str
+) -> str | None:
+    """Find the last non-empty data line without reading the whole CSV into memory."""
+    header_norm = header_line.strip()
+    scan = _LAST_ROW_TAIL_SCAN_INITIAL
+    for _ in range(32):
+        lines, full_read, file_size = _tail_file_lines(filepath, scan)
+        if file_size == 0:
+            return None
+        skip_leading_fragment = not full_read
+        candidates = lines[1:] if skip_leading_fragment and lines else lines
+        for line in reversed(candidates):
+            s = line.strip()
+            if not s or s == header_norm:
+                continue
+            return s
+        if full_read:
+            return None
+        if scan >= file_size or scan >= _LAST_ROW_TAIL_SCAN_MAX:
+            return None
+        scan = min(scan * 2, file_size, _LAST_ROW_TAIL_SCAN_MAX)
+    return None
+
+
+def get_last_candle_from_file(filepath: str):
+    """Get the last candle's Unix `start` from a CSV without loading the full file into pandas."""
+    try:
+        if not os.path.exists(filepath):
+            return None
+        header_line = _read_csv_header_line(filepath)
+        if not header_line:
+            return None
+        header_row = next(csv.reader(StringIO(header_line)))
+        if "start" not in header_row:
+            logger.error(f"No 'start' column in CSV header for {filepath}")
+            return None
+        start_idx = header_row.index("start")
+        last_line = _last_non_header_csv_line_from_tail(filepath, header_line)
+        if not last_line:
+            return None
+        data_row = next(csv.reader(StringIO(last_line)))
+        if start_idx >= len(data_row):
+            return None
+        return int(float(data_row[start_idx]))
     except Exception as e:
         logger.error(f"Error reading last candle from {filepath}: {e}")
         return None
