@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 
 # Engulfing patterns: allow current open to sit within this fractional distance of the
 # previous close when the strict textbook rule would reject a visually similar bar.
-# Example: 0.0005 means 0.05% — bullish allows open slightly above prev_close; bearish
+# Example: 0.00005 means 0.005% — bullish allows open slightly above prev_close; bearish
 # allows open slightly below prev_close. Change this single value to tune sensitivity.
-ENGULFING_OPEN_TOLERANCE = 0.0005
+ENGULFING_OPEN_TOLERANCE = 0.00005
 
 
 def calculate_kijun_v2_200_1(high_series: pd.Series, low_series: pd.Series, close_series: pd.Series) -> pd.Series:
