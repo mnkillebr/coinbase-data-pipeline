@@ -293,7 +293,34 @@ def process_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         1,
         0
     )
-    
+
+    # Calculate bullish/bearish engulfing patterns
+    # Bullish engulfing:
+    # 1) close is greater than the open
+    # 2) open is less than or equal to the previous close
+    # 3) close is greater than the previous open
+    # 4) previous candle is bearish
+    # Bearish engulfing:
+    # 1) close is less than the open
+    # 2) open is greater than or equal to the previous close
+    # 3) close is less than the previous open
+    # 4) previous candle is bullish
+    logger.info("Calculating bullish/bearish engulfing candle patterns...")
+    prev_close = df['close'].shift(1)
+    prev_open = df['open'].shift(1)
+    prev_is_bearish = df['close'].shift(1) < df['open'].shift(1)
+    prev_is_bullish = df['close'].shift(1) > df['open'].shift(1)
+    df['bullish_engulfing'] = np.where(
+        (is_bullish & (df['open'] <= prev_close) & (df['close'] > prev_open) & prev_is_bearish),
+        1,
+        0
+    )
+    df['bearish_engulfing'] = np.where(
+        (is_bearish & (df['open'] >= prev_close) & (df['close'] < prev_open) & prev_is_bullish),
+        1,
+        0
+    )
+
     # Calculate RSI first (needed for lagged features)
     logger.info("Calculating RSI...")
     df['rsi'] = talib.RSI(df['close'].values, timeperiod=14)
