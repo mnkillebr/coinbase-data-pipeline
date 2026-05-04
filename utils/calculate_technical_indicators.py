@@ -256,6 +256,43 @@ def process_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     
     # Ensure data is sorted by timestamp
     df = df.sort_values('timestamp').reset_index(drop=True)
+
+    # Calculate topping/bottoming tail candle patterns
+    # Topping tail:
+    #   1) bullish candle with upper wick > 50% of range, or
+    #   2) bearish candle that makes a higher high than previous candle and
+    #      has upper wick (high - open) > 50% of range
+    # Bottoming tail:
+    #   1) bearish candle with lower wick > 50% of range, or
+    #   2) bullish candle that makes a lower low than previous candle and
+    #      has lower wick (open - low) > 50% of range
+    logger.info("Calculating topping/bottoming tail candle patterns...")
+    candle_range = df['high'] - df['low']
+    prev_high = df['high'].shift(1)
+    prev_low = df['low'].shift(1)
+    is_bullish = df['close'] > df['open']
+    is_bearish = df['close'] < df['open']
+    bullish_upper_wick = df['high'] - df['close']
+    bearish_upper_wick = df['high'] - df['open']
+    bearish_lower_wick = df['close'] - df['low']
+    bullish_lower_wick = df['open'] - df['low']
+
+    df['topping_tail'] = np.where(
+        (
+            (is_bullish & (bullish_upper_wick > 0.5 * candle_range)) |
+            (is_bearish & (df['high'] > prev_high) & (bearish_upper_wick > 0.5 * candle_range))
+        ),
+        1,
+        0
+    )
+    df['bottoming_tail'] = np.where(
+        (
+            (is_bearish & (bearish_lower_wick > 0.5 * candle_range)) |
+            (is_bullish & (df['low'] < prev_low) & (bullish_lower_wick > 0.5 * candle_range))
+        ),
+        1,
+        0
+    )
     
     # Calculate RSI first (needed for lagged features)
     logger.info("Calculating RSI...")
