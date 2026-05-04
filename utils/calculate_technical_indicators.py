@@ -16,6 +16,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Engulfing patterns: allow current open to sit within this fractional distance of the
+# previous close when the strict textbook rule would reject a visually similar bar.
+# Example: 0.0005 means 0.05% — bullish allows open slightly above prev_close; bearish
+# allows open slightly below prev_close. Change this single value to tune sensitivity.
+ENGULFING_OPEN_TOLERANCE = 0.0005
+
 
 def calculate_kijun_v2_200_1(high_series: pd.Series, low_series: pd.Series, close_series: pd.Series) -> pd.Series:
     """Calculate Kijun V2 with period=200, kidiv=1"""
@@ -297,12 +303,12 @@ def process_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Calculate bullish/bearish engulfing patterns
     # Bullish engulfing:
     # 1) close is greater than the open
-    # 2) open is less than or equal to the previous close
+    # 2) open is at or below previous close, or within ENGULFING_OPEN_TOLERANCE above it
     # 3) close is greater than the previous open
     # 4) previous candle is bearish
     # Bearish engulfing:
     # 1) close is less than the open
-    # 2) open is greater than or equal to the previous close
+    # 2) open is at or above previous close, or within ENGULFING_OPEN_TOLERANCE below it
     # 3) close is less than the previous open
     # 4) previous candle is bullish
     logger.info("Calculating bullish/bearish engulfing candle patterns...")
@@ -310,13 +316,15 @@ def process_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     prev_open = df['open'].shift(1)
     prev_is_bearish = df['close'].shift(1) < df['open'].shift(1)
     prev_is_bullish = df['close'].shift(1) > df['open'].shift(1)
+    bullish_open_ok = df['open'] <= prev_close * (1.0 + ENGULFING_OPEN_TOLERANCE)
+    bearish_open_ok = df['open'] >= prev_close * (1.0 - ENGULFING_OPEN_TOLERANCE)
     df['bullish_engulfing'] = np.where(
-        (is_bullish & (df['open'] <= prev_close) & (df['close'] > prev_open) & prev_is_bearish),
+        (is_bullish & bullish_open_ok & (df['close'] > prev_open) & prev_is_bearish),
         1,
         0
     )
     df['bearish_engulfing'] = np.where(
-        (is_bearish & (df['open'] >= prev_close) & (df['close'] < prev_open) & prev_is_bullish),
+        (is_bearish & bearish_open_ok & (df['close'] < prev_open) & prev_is_bullish),
         1,
         0
     )
